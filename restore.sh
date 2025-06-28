@@ -30,9 +30,7 @@ fi
 echo
 echo "Available ERPNext sites:"
 mapfile -t SITES < <(
-  find "$SITES_DIR" -mindepth 1 -maxdepth 1 -type d \
-    -exec test -f "{}/site_config.json" ';' \
-    -printf '%f\n' | sort
+  find "$SITES_DIR" -mindepth 1 -maxdepth 1 -type d     -exec test -f "{}/site_config.json" ';'     -printf '%f\n' | sort
 )
 if [[ ${#SITES[@]} -eq 0 ]]; then
   echo "ERROR: No sites found in $SITES_DIR" >&2
@@ -53,12 +51,20 @@ BACKUP_DIR="$SITES_DIR/$SITE/private/backups"
 echo "Selected site: $SITE"
 echo "Backup directory: $BACKUP_DIR"
 
+# ─── BACKUP EXISTING SITE ──────────────────────────────────────────────────
+echo
+read -rp "Backup current site before restore? [Y/n]: " backup_confirm
+backup_confirm=${backup_confirm:-Y}
+if [[ "$backup_confirm" =~ ^[Yy]$ ]]; then
+  echo "📦 Backing up current site..."
+  bench --site "$SITE" backup --with-files
+fi
+
 # ─── SELECT BACKUP ─────────────────────────────────────────────────────────
 echo
 echo "Available SQL backups:"
 mapfile -t DUMPS < <(
-  find "$BACKUP_DIR" -maxdepth 1 -type f -name '*.sql.gz' \
-    -printf '%T@ %f\n' | sort -nr | cut -d' ' -f2-
+  find "$BACKUP_DIR" -maxdepth 1 -type f -name '*.sql.gz'     -printf '%T@ %f\n' | sort -nr | cut -d' ' -f2-
 )
 if [[ ${#DUMPS[@]} -eq 0 ]]; then
   echo "ERROR: No SQL backups found in $BACKUP_DIR" >&2
@@ -68,7 +74,7 @@ for i in "${!DUMPS[@]}"; do
   idx=$((i+1))
   echo " $idx) ${DUMPS[i]}"
 done
-read -rp "Select backup [1]: " didx
+read -rp "Select backup to restore [1]: " didx
 didx=${didx:-1}
 if (( didx < 1 || didx > ${#DUMPS[@]} )); then
   echo "ERROR: Invalid backup selection" >&2
