@@ -1,5 +1,5 @@
-# erpnext_restore
-Restore backup for staging
+# Erpnext Restore Script
+Restore backup for staging for ERPNext 15
 
 End-to-end restore script that uses the official bench restore command (so you don’t have to manually drop/create the database). It will:
 - List your sites
@@ -10,3 +10,5 @@ End-to-end restore script that uses the official bench restore command (so you d
 - Run bench restore … --with-public-files … --with-private-files …
 - Disable emails & scheduler
 - Restart services
+
+Save as restore.sh in your bench root, chmod +x, then run ./restore.sh
