@@ -5,13 +5,11 @@ set -euo pipefail
 BENCH_ROOT="$(cd "$(dirname "$0")" && pwd)"
 SITES_DIR="$BENCH_ROOT/sites"
 
-# ─── DEPENDENCY CHECK ──────────────────────────────────────────────────────
-for cmd in bench jq find stdbuf; do
-  if ! command -v "$cmd" >/dev/null 2>&1; then
-    echo "ERROR: Required command not found: $cmd" >&2
-    exit 1
-  fi
+# ─── DEPENDENCY CHECK (Compact) ────────────────────────────────────────────
+for cmd in bench jq find pv mysql gunzip tar gzip; do
+  command -v "$cmd" >/dev/null || { echo "❌ Missing: $cmd" >&2; missing=1; }
 done
+[[ ${missing:-0} -eq 1 ]] && exit 1
 
 # ─── MODE SELECTION ────────────────────────────────────────────────────────
 echo
@@ -106,19 +104,23 @@ echo
 echo "🔧 Enabling maintenance mode…"
 bench --site "$SITE" set-maintenance-mode on
 
-ROOT_FLAGS=(--db-root-username "$DB_USER")
-if [[ -n "$DB_PASS" ]]; then
-  ROOT_FLAGS+=(--db-root-password "$DB_PASS")
-fi
+echo
+echo "📄 Creating database if not exists…"
+mysql -u"$DB_USER" -p"$DB_PASS" -e "CREATE DATABASE IF NOT EXISTS \`$SITE\`;"
 
 echo
-echo "📥 Running bench restore (live progress)…"
-stdbuf -oL -eL bench --site "$SITE" restore \
-  "$BACKUP_DIR/$SQL_GZ" \
-  --with-public-files "$PUB_TAR" \
-  --with-private-files "$PRIV_TAR" \
-  "${ROOT_FLAGS[@]}" \
-  --force
+echo "📥 Restoring SQL database with % progress…"
+SQL_PATH="$BACKUP_DIR/$SQL_GZ"
+SQL_SIZE=$(gzip -l "$SQL_PATH" | awk 'NR==2 {print $2}')
+gunzip -c "$SQL_PATH" | pv -s "$SQL_SIZE" | mysql -u"$DB_USER" -p"$DB_PASS" "$SITE"
+
+echo
+echo "📂 Extracting public files…"
+tar -xf "$PUB_TAR" -C "$SITES_DIR/$SITE/public"
+
+echo
+echo "🔐 Extracting private files…"
+tar -xf "$PRIV_TAR" -C "$SITES_DIR/$SITE/private"
 
 # ─── POST-RESTORE ACTIONS ──────────────────────────────────────────────────
 echo
