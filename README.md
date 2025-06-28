@@ -13,4 +13,8 @@ End-to-end restore script that uses the official bench restore command (so you d
 
 Save as restore.sh in your bench root, chmod +x, then run ./restore.sh
 
-*Please note that path of backup with its respective private and public files must be in default location i.e., ~/frappe-bench/sites/frappe.site/private/backup
+## If you want to restore production bench, use restore_production.sh which will not disable emails and scheduler for the restored sites.
+
+* Please note that path of backup with its respective private and public files must be in default location i.e., ~/frappe-bench/sites/frappe.site/private/backup
+
+
