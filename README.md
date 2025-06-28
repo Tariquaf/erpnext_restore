@@ -114,7 +114,7 @@ This script **does not use `bench restore`**, because:
 - Offers more control over the restoration process
 - Supports fine-grained logging, customization, and visibility
 
-- **If you'd prefer to use restore_bench.sh, make it executable and let Bench manage the restore flow automatically. **
+## If you'd prefer to use restore_bench.sh, make it executable and let Bench manage the restore flow automatically. 
 
 ---
 
