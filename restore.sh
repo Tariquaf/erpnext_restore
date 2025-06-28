@@ -6,87 +6,143 @@ BENCH_ROOT="$(cd "$(dirname "$0")" && pwd)"
 SITES_DIR="$BENCH_ROOT/sites"
 
 # ─── DEPENDENCY CHECK ──────────────────────────────────────────────────────
-for cmd in bench jq find read; do
-  command -v "$cmd" >/dev/null 2>&1 \
-    || { echo "❌ '$cmd' is required but not installed."; exit 1; }
+for cmd in bench jq find stdbuf; do
+  if ! command -v "$cmd" >/dev/null 2>&1; then
+    echo "ERROR: Required command not found: $cmd" >&2
+    exit 1
+  fi
 done
 
-# ─── 1) PICK A SITE ─────────────────────────────────────────────────────────
+# ─── MODE SELECTION ────────────────────────────────────────────────────────
+echo
+echo "Select environment:"
+echo " 1) Production (emails & scheduler enabled after restore)"
+echo " 2) Staging    (emails & scheduler disabled after restore)"
+read -rp "Enter choice [1]: " mode
+mode=${mode:-1}
+if [[ "$mode" == "2" ]]; then
+  IS_STAGING=true
+  echo "➡️  Staging mode selected: will disable emails & scheduler."
+else
+  IS_STAGING=false
+  echo "➡️  Production mode selected: will enable emails & scheduler."
+fi
+
+# ─── SELECT SITE ───────────────────────────────────────────────────────────
+echo
+echo "Available ERPNext sites:"
 mapfile -t SITES < <(
-  find "$SITES_DIR" -maxdepth 1 -mindepth 1 -type d \
+  find "$SITES_DIR" -mindepth 1 -maxdepth 1 -type d \
     -exec test -f "{}/site_config.json" ';' \
     -printf '%f\n' | sort
 )
-[[ ${#SITES[@]} -gt 0 ]] || { echo "❌ No sites found in $SITES_DIR"; exit 1; }
-
-echo "Available ERPNext sites:"
+if [[ ${#SITES[@]} -eq 0 ]]; then
+  echo "ERROR: No sites found in $SITES_DIR" >&2
+  exit 1
+fi
 for i in "${!SITES[@]}"; do
-  printf "  %2d) %s\n" $((i+1)) "${SITES[i]}"
+  idx=$((i+1))
+  echo " $idx) ${SITES[i]}"
 done
-
-read -rp $'\nSelect site [1]: ' sidx; sidx=${sidx:-1}
-(( sidx>=1 && sidx<=${#SITES[@]} )) \
-  || { echo "❌ Invalid choice"; exit 1; }
+read -rp "Select site [1]: " sidx
+sidx=${sidx:-1}
+if (( sidx < 1 || sidx > ${#SITES[@]} )); then
+  echo "ERROR: Invalid site selection" >&2
+  exit 1
+fi
 SITE="${SITES[$((sidx-1))]}"
-DB_NAME="${SITE//./_}"
 BACKUP_DIR="$SITES_DIR/$SITE/private/backups"
+echo "Selected site: $SITE"
+echo "Backup directory: $BACKUP_DIR"
 
-echo -e "\n👉 Selected site: $SITE (DB: $DB_NAME)"
-echo "   Backups folder: $BACKUP_DIR"
+# ─── SELECT BACKUP ─────────────────────────────────────────────────────────
 echo
-
-# ─── 2) PICK A BACKUP DUMP ─────────────────────────────────────────────────
+echo "Available SQL backups:"
 mapfile -t DUMPS < <(
   find "$BACKUP_DIR" -maxdepth 1 -type f -name '*.sql.gz' \
     -printf '%T@ %f\n' | sort -nr | cut -d' ' -f2-
 )
-[[ ${#DUMPS[@]} -gt 0 ]] \
-  || { echo "❌ No .sql.gz dumps in $BACKUP_DIR"; exit 1; }
-
-echo "Available SQL dumps for $SITE:"
+if [[ ${#DUMPS[@]} -eq 0 ]]; then
+  echo "ERROR: No SQL backups found in $BACKUP_DIR" >&2
+  exit 1
+fi
 for i in "${!DUMPS[@]}"; do
-  printf "  %2d) %s\n" $((i+1)) "${DUMPS[i]}"
+  idx=$((i+1))
+  echo " $idx) ${DUMPS[i]}"
 done
-
-read -rp $'\nSelect dump [1]: ' didx; didx=${didx:-1}
-(( didx>=1 && didx<=${#DUMPS[@]} )) \
-  || { echo "❌ Invalid choice"; exit 1; }
+read -rp "Select backup [1]: " didx
+didx=${didx:-1}
+if (( didx < 1 || didx > ${#DUMPS[@]} )); then
+  echo "ERROR: Invalid backup selection" >&2
+  exit 1
+fi
 SQL_GZ="${DUMPS[$((didx-1))]}"
 BASE="${SQL_GZ%-database.sql.gz}"
 PUB_TAR="$BACKUP_DIR/${BASE}-files.tar"
 PRIV_TAR="$BACKUP_DIR/${BASE}-private-files.tar"
 
-echo -e "\n👉 Will restore:\n   • SQL:     $SQL_GZ\n   • Public:  $(basename "$PUB_TAR")\n   • Private: $(basename "$PRIV_TAR")"
-read -rp $'\nProceed? [Y/n]: ' ok; ok=${ok:-Y}
-[[ $ok =~ ^[Yy]$ ]] || { echo "Aborted."; exit 0; }
+echo
+echo "Chosen backup:"
+echo " SQL:     $SQL_GZ"
+echo " Public:  $(basename "$PUB_TAR")"
+echo " Private: $(basename "$PRIV_TAR")"
+read -rp "Proceed with restore? [Y/n]: " ok
+ok=${ok:-Y}
+if [[ ! $ok =~ ^[Yy]$ ]]; then
+  echo "Aborting."
+  exit 0
+fi
 
-# ─── 3) ASK FOR DB-ROOT CREDENTIALS ────────────────────────────────────────
-read -rp "MySQL admin user [root]: " DB_USER; DB_USER=${DB_USER:-root}
-read -rsp "MySQL admin password: " DB_PASS; echo
+# ─── MYSQL ROOT CREDENTIALS ────────────────────────────────────────────────
+echo
+read -rp "MySQL admin user [root]: " DB_USER
+DB_USER=${DB_USER:-root}
+read -rsp "MySQL admin password: " DB_PASS
+echo
 
-# ─── 4) PERFORM RESTORE ─────────────────────────────────────────────────────
+# ─── RESTORE PROCESS ───────────────────────────────────────────────────────
 cd "$BENCH_ROOT"
-
-echo -e "\n🔧 Enabling maintenance mode…"
+echo
+echo "🔧 Enabling maintenance mode…"
 bench --site "$SITE" set-maintenance-mode on
 
-echo "📥 Running bench restore…"
-bench --site "$SITE" restore \
+ROOT_FLAGS=(--db-root-username "$DB_USER")
+if [[ -n "$DB_PASS" ]]; then
+  ROOT_FLAGS+=(--db-root-password "$DB_PASS")
+fi
+
+echo
+echo "📥 Running bench restore (live progress)…"
+stdbuf -oL -eL bench --site "$SITE" restore \
   "$BACKUP_DIR/$SQL_GZ" \
   --with-public-files "$PUB_TAR" \
   --with-private-files "$PRIV_TAR" \
-  --db-root-username "$DB_USER" \
-  --db-root-password "$DB_PASS" \
+  "${ROOT_FLAGS[@]}" \
   --force
 
-echo -e "\n📪 Disabling outgoing emails & pausing scheduler…"
-bench --site "$SITE" set-config disable_emails 1
-bench --site "$SITE" set-config pause_scheduler 1
+# ─── POST-RESTORE ACTIONS ──────────────────────────────────────────────────
+echo
+if [[ "$IS_STAGING" == true ]]; then
+  echo "📪 Disabling emails & pausing scheduler…"
+  bench --site "$SITE" set-config disable_emails 1
+  bench --site "$SITE" set-config pause_scheduler 1
+else
+  echo "📬 Enabling emails & resuming scheduler…"
+  bench --site "$SITE" set-config disable_emails 0
+  bench --site "$SITE" set-config pause_scheduler 0
+fi
 
+echo
 echo "🟢 Disabling maintenance mode…"
 bench --site "$SITE" set-maintenance-mode off
 
-echo "🔄 Restarting supervisor-managed services…"
+echo
+echo "🔄 Restarting supervisor services…"
 sudo supervisorctl restart all
 
-echo -e "\n🎉 Restore complete for $SITE!"
+echo
+MODE_TEXT="production"
+if [[ "$IS_STAGING" == true ]]; then
+  MODE_TEXT="staging"
+fi
+echo "✅ Restore complete for $SITE — $MODE_TEXT mode."
