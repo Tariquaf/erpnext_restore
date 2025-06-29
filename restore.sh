@@ -5,7 +5,7 @@ set -euo pipefail
 BENCH_ROOT="$(cd "$(dirname "$0")" && pwd)"
 SITES_DIR="$BENCH_ROOT/sites"
 
-# ─── DEPENDENCY CHECK (Compact) ────────────────────────────────────────────
+# ─── DEPENDENCY CHECK ──────────────────────────────────────────────────────
 for cmd in bench jq find pv mysql gunzip tar gzip; do
   command -v "$cmd" >/dev/null || { echo "❌ Missing: $cmd" >&2; missing=1; }
 done
@@ -30,15 +30,16 @@ fi
 echo
 echo "Available ERPNext sites:"
 mapfile -t SITES < <(
-  find "$SITES_DIR" -mindepth 1 -maxdepth 1 -type d     -exec test -f "{}/site_config.json" ';'     -printf '%f\n' | sort
+  find "$SITES_DIR" -mindepth 1 -maxdepth 1 -type d \
+    -exec test -f "{}/site_config.json" ';' \
+    -printf '%f\n' | sort
 )
 if [[ ${#SITES[@]} -eq 0 ]]; then
   echo "ERROR: No sites found in $SITES_DIR" >&2
   exit 1
 fi
 for i in "${!SITES[@]}"; do
-  idx=$((i+1))
-  echo " $idx) ${SITES[i]}"
+  echo " $((i+1))) ${SITES[i]}"
 done
 read -rp "Select site [1]: " sidx
 sidx=${sidx:-1}
@@ -47,9 +48,9 @@ if (( sidx < 1 || sidx > ${#SITES[@]} )); then
   exit 1
 fi
 SITE="${SITES[$((sidx-1))]}"
-BACKUP_DIR="$SITES_DIR/$SITE/private/backups"
+SITE_DIR="$SITES_DIR/$SITE"
+BACKUP_DIR="$SITE_DIR/private/backups"
 echo "Selected site: $SITE"
-echo "Backup directory: $BACKUP_DIR"
 
 # ─── BACKUP EXISTING SITE ──────────────────────────────────────────────────
 echo
@@ -62,73 +63,82 @@ fi
 
 # ─── SELECT BACKUP ─────────────────────────────────────────────────────────
 echo
-echo "Available SQL backups:"
+echo "Available SQL backups in $BACKUP_DIR:"
 mapfile -t DUMPS < <(
-  find "$BACKUP_DIR" -maxdepth 1 -type f -name '*.sql.gz'     -printf '%T@ %f\n' | sort -nr | cut -d' ' -f2-
+  find "$BACKUP_DIR" -maxdepth 1 -type f -name '*-database.sql.gz' \
+    -printf '%T@ %f\n' | sort -nr | cut -d' ' -f2-
 )
 if [[ ${#DUMPS[@]} -eq 0 ]]; then
   echo "ERROR: No SQL backups found in $BACKUP_DIR" >&2
   exit 1
 fi
 for i in "${!DUMPS[@]}"; do
-  idx=$((i+1))
-  echo " $idx) ${DUMPS[i]}"
+  echo " $((i+1))) ${DUMPS[i]}"
 done
-read -rp "Select backup to restore [1]: " didx
+read -rp "Select backup [1]: " didx
 didx=${didx:-1}
 if (( didx < 1 || didx > ${#DUMPS[@]} )); then
   echo "ERROR: Invalid backup selection" >&2
   exit 1
 fi
+
 SQL_GZ="${DUMPS[$((didx-1))]}"
 BASE="${SQL_GZ%-database.sql.gz}"
-PUB_TAR="$BACKUP_DIR/${BASE}-files.tar"
-PRIV_TAR="$BACKUP_DIR/${BASE}-private-files.tar"
+PUB_TAR="${BASE}-files.tar"
+PRIV_TAR="${BASE}-private-files.tar"
+SITE_CONFIG_JSON="${BASE}-site_config_backup.json"
+echo "Chosen backup: $SQL_GZ"
 
-echo
-echo "Chosen backup:"
-echo " SQL:     $SQL_GZ"
-echo " Public:  $(basename "$PUB_TAR")"
-echo " Private: $(basename "$PRIV_TAR")"
 read -rp "Proceed with restore? [Y/n]: " ok
 ok=${ok:-Y}
-if [[ ! $ok =~ ^[Yy]$ ]]; then
-  echo "Aborting."
-  exit 0
-fi
+[[ ! $ok =~ ^[Yy]$ ]] && echo "Aborting." && exit 0
 
 # ─── MYSQL ROOT CREDENTIALS ────────────────────────────────────────────────
 echo
-read -rp "MySQL admin user [root]: " DB_USER
-DB_USER=${DB_USER:-root}
-read -rsp "MySQL admin password: " DB_PASS
+read -rp "MySQL admin user [root]: " ROOT_USER
+ROOT_USER=${ROOT_USER:-root}
+read -rsp "MySQL admin password: " ROOT_PASS
 echo
 
-# ─── RESTORE PROCESS ───────────────────────────────────────────────────────
+# ─── RESTORE ───────────────────────────────────────────────────────────────
 cd "$BENCH_ROOT"
-echo
 echo "🔧 Enabling maintenance mode…"
 bench --site "$SITE" set-maintenance-mode on
 
+# Extract db name and password from site_config_backup.json
+DB_NAME=$(jq -r .db_name "$BACKUP_DIR/$SITE_CONFIG_JSON")
+DB_USER="$DB_NAME"
+DB_PASS=$(jq -r .db_password "$BACKUP_DIR/$SITE_CONFIG_JSON")
+
 echo
-echo "📄 Creating database if not exists…"
-mysql -u"$DB_USER" -p"$DB_PASS" -e "CREATE DATABASE IF NOT EXISTS \`$SITE\`;"
+echo "💣 Dropping database $DB_NAME (if exists)…"
+mysql -u"$ROOT_USER" -p"$ROOT_PASS" -e "DROP DATABASE IF EXISTS \`$DB_NAME\`;"
+
+echo "📄 Creating database $DB_NAME…"
+mysql -u"$ROOT_USER" -p"$ROOT_PASS" -e "CREATE DATABASE \`$DB_NAME\`;"
+
+echo "👤 Creating MySQL user '$DB_USER' with restored password…"
+mysql -u"$ROOT_USER" -p"$ROOT_PASS" -e "CREATE USER IF NOT EXISTS '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS';"
+mysql -u"$ROOT_USER" -p"$ROOT_PASS" -e "GRANT ALL PRIVILEGES ON \`$DB_NAME\`.* TO '$DB_USER'@'localhost';"
+mysql -u"$ROOT_USER" -p"$ROOT_PASS" -e "FLUSH PRIVILEGES;"
+
+echo "🛠 Replacing live site_config.json with restored config…"
+cp "$BACKUP_DIR/$SITE_CONFIG_JSON" "$SITE_DIR/site_config.json"
 
 echo
 echo "📥 Restoring SQL database with % progress…"
 SQL_PATH="$BACKUP_DIR/$SQL_GZ"
 SQL_SIZE=$(gzip -l "$SQL_PATH" | awk 'NR==2 {print $2}')
-gunzip -c "$SQL_PATH" | pv -s "$SQL_SIZE" | mysql -u"$DB_USER" -p"$DB_PASS" "$SITE"
+gunzip -c "$SQL_PATH" | pv -s "$SQL_SIZE" | mysql -u"$ROOT_USER" -p"$ROOT_PASS" "$DB_NAME"
 
 echo
 echo "📂 Extracting public files…"
-tar -xf "$PUB_TAR" -C "$SITES_DIR/$SITE/public"
+tar -xf "$BACKUP_DIR/$PUB_TAR" -C "$SITE_DIR/public"
 
 echo
 echo "🔐 Extracting private files…"
-tar -xf "$PRIV_TAR" -C "$SITES_DIR/$SITE/private"
+tar -xf "$BACKUP_DIR/$PRIV_TAR" -C "$SITE_DIR/private"
 
-# ─── POST-RESTORE ACTIONS ──────────────────────────────────────────────────
 echo
 if [[ "$IS_STAGING" == true ]]; then
   echo "📪 Disabling emails & pausing scheduler…"
@@ -141,6 +151,11 @@ else
 fi
 
 echo
+echo "🧹 Clearing cache and running migrate…"
+bench --site "$SITE" clear-cache
+bench --site "$SITE" migrate
+
+echo
 echo "🟢 Disabling maintenance mode…"
 bench --site "$SITE" set-maintenance-mode off
 
@@ -150,7 +165,5 @@ sudo supervisorctl restart all
 
 echo
 MODE_TEXT="production"
-if [[ "$IS_STAGING" == true ]]; then
-  MODE_TEXT="staging"
-fi
+[[ "$IS_STAGING" == true ]] && MODE_TEXT="staging"
 echo "✅ Restore complete for $SITE — $MODE_TEXT mode."
